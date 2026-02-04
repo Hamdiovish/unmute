@@ -5,4 +5,4 @@ cd "$(dirname "$0")/.."
 cd frontend
 pnpm install
 pnpm env use --global lts
-pnpm dev
+pnpm dev -H 0.0.0.0 -p 3000

@@ -1,14 +1,16 @@
 # See NOTE comments for places to modify.
 services:
   traefik:
-    image: traefik:v3.3.1
+    image: traefik:v2.11
     command:
       # Swarm provider configuration
-      - "--providers.docker=true"
-      - "--providers.docker.exposedbydefault=false"
+      # - "--providers.docker=true"
+      # - "--providers.docker.exposedbydefault=false"
 
       # This is set up for HTTP. If you want HTTPS support for production, use Docker Swarm
       # (check out swarm-deploy.yml) or ask ChatGPT to modify this file for you.
+      - "--providers.docker=true"           # <--- Enable Docker discovery
+      - "--providers.docker.exposedbydefault=false" # <--- Respect the 'traefik.enable' label
       - "--entrypoints.web.address=:80"
     ports:
       - "80:80"
@@ -40,7 +42,7 @@ services:
       - KYUTAI_STT_URL=ws://stt:8080
       - KYUTAI_TTS_URL=ws://tts:8080
       - KYUTAI_LLM_URL=http://llm:8000
-      - NEWSAPI_API_KEY=$NEWSAPI_API_KEY
+      - NEWSAPI_API_KEY=${NEWSAPI_API_KEY}
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.backend.rule=PathPrefix(`/api`)"
@@ -53,13 +55,13 @@ services:
       - "prometheus-port=80"
 
   tts:
-    image: moshi-server:latest
+    image: moshi-server-tts:latest
     command: ["worker", "--config", "configs/tts.toml"]
     build:
       context: services/moshi-server
       dockerfile: public.Dockerfile
     environment:
-      - HUGGING_FACE_HUB_TOKEN=$HUGGING_FACE_HUB_TOKEN
+      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN}
     volumes:
       - ./volumes/hf-cache:/root/.cache/huggingface
       - ./volumes/cargo-registry-tts:/root/.cargo/registry
@@ -67,6 +69,8 @@ services:
       - ./volumes/uv-cache:/root/.cache/uv
       - /tmp/models/:/models
       - ./volumes/tts-logs:/tmp/unmute_logs
+      - ${HF_CACHE_HUB}:${HF_CACHE_HUB}
+    runtime: nvidia
     deploy:
       resources:
         reservations:
@@ -76,13 +80,13 @@ services:
               capabilities: [gpu]
 
   stt:
-    image: moshi-server:latest
+    image: moshi-server-stt:latest
     command: ["worker", "--config", "configs/stt.toml"]
     build:
       context: services/moshi-server
       dockerfile: public.Dockerfile
     environment:
-      - HUGGING_FACE_HUB_TOKEN=$HUGGING_FACE_HUB_TOKEN
+      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN}
     volumes:
       - ./volumes/hf-cache:/root/.cache/huggingface
       - ./volumes/cargo-registry-stt:/root/.cargo/registry
@@ -90,6 +94,8 @@ services:
       - ./volumes/uv-cache:/root/.cache/uv
       - /tmp/models/:/models
       - ./volumes/stt-logs:/tmp/unmute_logs
+      - ${HF_CACHE_HUB}:${HF_CACHE_HUB}
+    runtime: nvidia
     deploy:
       resources:
         reservations:
@@ -99,7 +105,8 @@ services:
               capabilities: [gpu]
 
   llm:
-    image: vllm/vllm-openai:v0.11.0
+    image: yanwk/vllm:v0.15.0-cu130
+    ipc: host
     command:
       [
         # NOTE: Change the LLM here if you want.
@@ -107,17 +114,21 @@ services:
         "--model=meta-llama/Llama-3.2-1B-Instruct",
         # NOTE: You can adapt this based on your GPU memory.
         # A higher value takes more memory but supports longer conversations.
-        "--max-model-len=1536",
+        "--max-model-len=8192",
         "--dtype=bfloat16",
         # NOTE: Change this based on your GPU memory.
         # A higher value can make inference faster.
-        "--gpu-memory-utilization=0.4",
+        "--gpu-memory-utilization=0.3",
+        "--port=8000",
       ]
     volumes:
-      - ./volumes/hf-cache:/root/.cache/huggingface
+      - ./volumes/uv-cache-llm:/root/.cache/uv
+      - ./volumes/hf-cache/hub:/root/.cache/huggingface
       - ./volumes/vllm-cache:/root/.cache/vllm
+      - ${HF_CACHE_HUB}:${HF_CACHE_HUB}
     environment:
-      - HUGGING_FACE_HUB_TOKEN=$HUGGING_FACE_HUB_TOKEN
+      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN}
+    runtime: nvidia
     deploy:
       resources:
         reservations:
@@ -126,5 +137,29 @@ services:
               count: all
               capabilities: [gpu]
 
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    volumes:
+      - open-webui:/app/backend/data
+    environment:
+      # This points Open WebUI to your vLLM instance
+      - OPENAI_API_BASE_URL=http://llm:8000/v1
+      # vLLM usually doesn't need a key, but the UI might require a placeholder
+      - OPENAI_API_KEY=vllm-rocks 
+      # Optional: Disable Ollama if you aren't using it to clean up the UI
+      - ENABLE_OLLAMA_API=False
+    labels:
+          - "traefik.enable=true"
+          # This routes http://your-ip/chat to Open WebUI
+          - "traefik.http.routers.webui.rule=PathPrefix(`/chat`)"
+          - "traefik.http.routers.webui.entrypoints=web"
+          - "traefik.http.services.webui.loadbalancer.server.port=8080"
+          - "traefik.http.routers.webui.priority=110"
+    ports:
+      - "3030:8080"
+
 networks:
   default:
+
+volumes:
+  open-webui:
